@@ -50,24 +50,39 @@ async def test_connection():
 
 
 # Core functionality
-def get_deepseek_response(prompt: str) -> str:
-    """Get response from DeepSeek API"""
-    api_key = os.getenv("DEEPSEEK_API_KEY")
+def get_llama_response(prompt: str) -> str:
+    """Get response from Llama API"""
+    api_key = os.getenv("LLAMA_API_KEY")
     if not api_key:
-        raise ValueError("DeepSeek API key not configured")
+        raise ValueError("Llama API key not configured")
 
-    headers = {"Authorization": f"Bearer {api_key}"}
-    payload = {
-        "model": "deepseek-chat",
-        "messages": [
-            {"role": "system", "content": "Respond as a mental health assistant in 1-2 sentences."},
-            {"role": "user", "content": prompt}
-        ],
-        "temperature": 0.7
+    model = os.getenv("LLAMA_MODEL", "llama-3-70b-instruct")
+    api_base = os.getenv("LLAMA_API_BASE", "https://api.llama.ai/v1")
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
     }
+
+    payload = {
+        "model": model,
+        "messages": [
+            {
+                "role": "system",
+                "content": "You are a compassionate mental health assistant. Respond with brief, empathetic answers (1-2 sentences)."
+            },
+            {
+                "role": "user",
+                "content": prompt
+            }
+        ],
+        "temperature": 0.7,
+        "max_tokens": 150
+    }
+
     try:
         response = requests.post(
-            "https://api.deepseek.com/v1/chat/completions",
+            f"{api_base}/chat/completions",
             headers=headers,
             json=payload,
             timeout=15
@@ -75,10 +90,10 @@ def get_deepseek_response(prompt: str) -> str:
         response.raise_for_status()
         return response.json()["choices"][0]["message"]["content"]
     except requests.exceptions.RequestException as e:
-        print(f"API Connection Error: {e}")
+        print(f"Llama API Connection Error: {e}")
         return "I'm having connection issues. Please try again later."
     except Exception as e:
-        print(f"API Processing Error: {e}")
+        print(f"Llama API Processing Error: {e}")
         return "I'm having trouble formulating a response."
 
 
@@ -145,7 +160,7 @@ async def process_audio(file: UploadFile):
         print(f"User: {user_text}")
 
         # 2. Get AI response
-        ai_text = get_deepseek_response(user_text)
+        ai_text = get_llama_response(user_text)
         print(f"AI: {ai_text}")
 
         # 3. Store conversation
