@@ -16,10 +16,15 @@ app = FastAPI()
 
 # --- Initialize Services ---
 try:
-    client = MongoClient(os.getenv("MONGO_URI", "mongodb://localhost:27017"), connectTimeoutMS=5000)
+    client = MongoClient(
+        os.getenv("MONGO_URI", "mongodb://localhost:27017"),
+        connectTimeoutMS=5000,
+        serverSelectionTimeoutMS=5000
+    )
     db = client["mental_health_db"]
     users = db["users"]
-    client.admin.command('ping')  # Test connection
+    # Immediate connection test
+    client.admin.command('ping')
     print("✅ Successfully connected to MongoDB")
 except Exception as e:
     print(f"❌ MongoDB connection error: {e}")
@@ -33,35 +38,43 @@ except Exception as e:
     raise
 
 
-# Health check endpoints
+# --- Health Endpoints ---
 @app.get("/")
 async def root():
-    return {"message": "Mental Health Companion API", "status": "running"}
+    return {
+        "service": "Mental Health Companion",
+        "status": "operational",
+        "llm_provider": "Groq",
+        "timestamp": datetime.now().isoformat()
+    }
 
 
 @app.get("/health")
 async def health_check():
-    return {"status": "ready", "timestamp": datetime.now().isoformat()}
+    return {
+        "status": "healthy",
+        "services": {
+            "mongodb": "connected",
+            "whisper": "loaded",
+            "groq_api": "configured" if os.getenv("GROQ_API_KEY") else "missing_key"
+        }
+    }
 
 
-@app.get("/test_connection")
-async def test_connection():
-    return {"message": "Connection test successful", "success": True}
-
-
-# Core functionality
-def get_llama_response(prompt: str) -> str:
-    """Get response from Llama API"""
-    api_key = os.getenv("LLAMA_API_KEY")
+# --- Core API Functions ---
+def get_groq_response(prompt: str) -> str:
+    """Get response from Groq's ultra-fast API"""
+    api_key = os.getenv("GROQ_API_KEY")
     if not api_key:
-        raise ValueError("Llama API key not configured")
+        raise ValueError("Groq API key not configured in environment variables")
 
-    model = os.getenv("LLAMA_MODEL", "llama-3-70b-instruct")
-    api_base = os.getenv("LLAMA_API_BASE", "https://api.llama.ai/v1")
+    model = os.getenv("GROQ_MODEL", "mixtral-8x7b-32768")
+    api_base = os.getenv("GROQ_API_BASE", "https://api.groq.com/openai/v1")
 
     headers = {
         "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json"
+        "Content-Type": "application/json",
+        "User-Agent": "MentalHealthCompanion/1.0"
     }
 
     payload = {
@@ -69,7 +82,10 @@ def get_llama_response(prompt: str) -> str:
         "messages": [
             {
                 "role": "system",
-                "content": "You are a compassionate mental health assistant. Respond with brief, empathetic answers (1-2 sentences)."
+                "content": """You are a compassionate mental health assistant. 
+                Respond with brief (1-2 sentence), empathetic answers.
+                Maintain a warm, non-judgmental tone.
+                If user seems in crisis, suggest professional help."""
             },
             {
                 "role": "user",
@@ -77,7 +93,10 @@ def get_llama_response(prompt: str) -> str:
             }
         ],
         "temperature": 0.7,
-        "max_tokens": 150
+        "max_tokens": 150,
+        "top_p": 0.9,
+        "frequency_penalty": 0.2,
+        "presence_penalty": 0.2
     }
 
     try:
@@ -85,109 +104,138 @@ def get_llama_response(prompt: str) -> str:
             f"{api_base}/chat/completions",
             headers=headers,
             json=payload,
-            timeout=15
+            timeout=10  # Groq typically responds in <500ms
         )
         response.raise_for_status()
         return response.json()["choices"][0]["message"]["content"]
     except requests.exceptions.RequestException as e:
-        print(f"Llama API Connection Error: {e}")
-        return "I'm having connection issues. Please try again later."
+        error_msg = f"Groq API Error: {str(e)}"
+        if hasattr(e, 'response') and e.response:
+            error_msg += f" | Response: {e.response.text[:200]}"
+        print(error_msg)
+        return "I'm having trouble connecting to my assistance system. Please try again shortly."
     except Exception as e:
-        print(f"Llama API Processing Error: {e}")
-        return "I'm having trouble formulating a response."
+        print(f"Unexpected Groq processing error: {str(e)}")
+        return "I'm having difficulty formulating a response right now."
 
 
+# --- User Management ---
 @app.post("/register_user")
 async def register_user(user_data: Dict[str, Any]):
-    """Register a new user"""
+    """Register a new user with the system"""
     try:
-        if "name" not in user_data or not user_data["name"].strip():
+        if not user_data.get("name", "").strip():
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Name is required"
+                detail="Name must be provided and non-empty"
             )
 
-        result = users.insert_one({
+        user_doc = {
             "name": user_data["name"].strip(),
             "conversations": [],
             "created_at": datetime.now(),
-            "last_active": datetime.now()
-        })
+            "last_active": datetime.now(),
+            "settings": {
+                "preferred_voice": "default",
+                "emergency_contact": None
+            }
+        }
+
+        result = users.insert_one(user_doc)
+
         return {
             "status": "success",
             "user_id": str(result.inserted_id),
-            "name": user_data["name"]
+            "name": user_doc["name"],
+            "timestamp": user_doc["created_at"].isoformat()
         }
+
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(e)
+            detail=f"User registration failed: {str(e)}"
         )
 
 
+# --- Audio Processing ---
 @app.post("/process_audio")
-async def process_audio(file: UploadFile):
+async def process_audio(file: UploadFile, user_id: str = None):
+    """Process audio input and return AI response"""
     try:
-        # Validate file
+        # 1. Validate input
         if not file.content_type or not file.content_type.startswith('audio/'):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Only audio files are accepted"
+                detail="Only audio files are accepted (WAV, MP3, etc.)"
             )
 
-        # 1. Convert speech to text
+        # 2. Process audio
         audio_bytes = await file.read()
         if len(audio_bytes) == 0:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Empty audio file received"
+                detail="Received empty audio file"
             )
 
         audio_np = np.frombuffer(audio_bytes, np.int16)
         if len(audio_np) == 0:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Invalid audio data"
+                detail="Invalid audio data format"
             )
 
+        # 3. Convert speech to text
         audio_float = audio_np.astype(np.float32) / 32768.0
         result = whisper_model.transcribe(audio_float)
         user_text = result.get("text", "").strip()
 
         if not user_text:
-            return {"text": "I didn't catch that. Could you repeat?"}
+            return {"text": "I didn't catch that. Could you please repeat?"}
 
         print(f"User: {user_text}")
 
-        # 2. Get AI response
-        ai_text = get_llama_response(user_text)
+        # 4. Get AI response
+        ai_text = get_groq_response(user_text)
         print(f"AI: {ai_text}")
 
-        # 3. Store conversation
+        # 5. Store conversation
+        conversation_entry = {
+            "user_text": user_text,
+            "ai_response": ai_text,
+            "timestamp": datetime.now(),
+            "audio_length": len(audio_np) / 16000  # duration in seconds
+        }
+
+        update_filter = {"_id": user_id} if user_id else {"name": "current_user"}
         users.update_one(
-            {"name": "current_user"},
-            {"$push": {"conversations": {
-                "user_text": user_text,
-                "ai_response": ai_text,
-                "timestamp": datetime.now()
-            }}},
+            update_filter,
+            {
+                "$push": {"conversations": conversation_entry},
+                "$set": {"last_active": datetime.now()}
+            },
             upsert=True
         )
 
         return {"text": ai_text}
+
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Processing error: {str(e)}"
+            detail=f"Audio processing failed: {str(e)}"
         )
 
 
+# --- Server Startup ---
 if __name__ == "__main__":
     uvicorn.run(
         "server:app",
         host=os.getenv("SERVER_HOST", "127.0.0.1"),
         port=int(os.getenv("SERVER_PORT", "8000")),
-        reload=True
+        reload=True,
+        log_level="info",
+        timeout_keep_alive=30
     )
