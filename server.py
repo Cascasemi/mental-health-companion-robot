@@ -16,7 +16,7 @@ app = FastAPI()
 
 # --- Initialize Services ---
 try:
-    client = MongoClient(os.getenv("MONGO_URI", ""), connectTimeoutMS=5000)
+    client = MongoClient(os.getenv("MONGO_URI", "mongodb://localhost:27017"), connectTimeoutMS=5000)
     db = client["mental_health_db"]
     users = db["users"]
     client.admin.command('ping')  # Test connection
@@ -33,6 +33,23 @@ except Exception as e:
     raise
 
 
+# Health check endpoints
+@app.get("/")
+async def root():
+    return {"message": "Mental Health Companion API", "status": "running"}
+
+
+@app.get("/health")
+async def health_check():
+    return {"status": "ready", "timestamp": datetime.now().isoformat()}
+
+
+@app.get("/test_connection")
+async def test_connection():
+    return {"message": "Connection test successful", "success": True}
+
+
+# Core functionality
 def get_deepseek_response(prompt: str) -> str:
     """Get response from DeepSeek API"""
     api_key = os.getenv("DEEPSEEK_API_KEY")
@@ -152,15 +169,10 @@ async def process_audio(file: UploadFile):
         )
 
 
-def start_server():
+if __name__ == "__main__":
     uvicorn.run(
-        "server:app",  # Changed to import string format
+        "server:app",
         host=os.getenv("SERVER_HOST", "127.0.0.1"),
         port=int(os.getenv("SERVER_PORT", "8000")),
-        reload=True,
-        workers=1
+        reload=True
     )
-
-
-if __name__ == "__main__":
-    start_server()
